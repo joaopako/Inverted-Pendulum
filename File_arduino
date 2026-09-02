@@ -1,0 +1,185 @@
+#include <AccelStepper.h>
+
+// --- Configurações do Motor ---
+int velocidade_motor = 4000; 
+int aceleracao_motor = 8000;  
+int sentido_horario = 0;
+int sentido_antihorario = 0;
+int numero = 0; 
+bool pid_ativo = true; // --- NOVO: Trava de Segurança do PID ---
+
+// --- Pinos do Driver do Motor ---
+const int pino_step = 7;
+const int pino_dir = 4;
+const int pino_enable = 10;
+AccelStepper motor1(1, pino_step, pino_dir); // 1 = Modo Driver
+
+// --- Pinos de Microstepping ---
+const int pino_ms1 = 8;
+const int pino_ms2 = 9;
+const int pino_ms3 = 11;
+
+// --- Pinos e variáveis do Encoder ---
+const int encoderPinA = 2;
+const int encoderPinB = 3;
+volatile long encoderPos = 0; 
+long ultimaPosicao = 0;       
+
+// --- Memórias e Ganhos do PID ---
+float Kp = 6.0;  
+float Ki = 0.0;  
+float Kd = 0.15; 
+
+float erro_anterior = 0.0;
+float soma_erros = 0.0;       
+unsigned long tempo_anterior = 0;
+
+// ==============================================================================
+// FUNÇÕES AUXILIARES
+// ==============================================================================
+float calcularErroCurto(float setpoint, float posicao_atual) {
+  float erro = setpoint - posicao_atual;
+  while (erro > 180.0) { erro = erro - 360.0; }
+  while (erro <= -180.0) { erro = erro + 360.0; }
+  return erro;
+}
+
+void doEncoder() {
+  if (digitalRead(encoderPinB) == HIGH) { encoderPos++; } 
+  else { encoderPos--; }
+}
+
+// ==============================================================================
+// SETUP
+// ==============================================================================
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(pino_ms1, OUTPUT); pinMode(pino_ms2, OUTPUT); pinMode(pino_ms3, OUTPUT);
+  digitalWrite(pino_ms1, HIGH); digitalWrite(pino_ms2, HIGH); digitalWrite(pino_ms3, HIGH);
+
+  pinMode(pino_enable, OUTPUT);
+  digitalWrite(pino_enable, HIGH); 
+  motor1.setMaxSpeed(velocidade_motor);
+  motor1.setAcceleration(aceleracao_motor);
+  motor1.setSpeed(0);
+  
+  pinMode(encoderPinA, INPUT_PULLUP);
+  pinMode(encoderPinB, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(encoderPinA), doEncoder, RISING);
+  
+  Serial.println("Sistema Iniciado.");
+  Serial.println("Comandos: '1'(Esq), '2'(Dir), 's'(Parar Tudo), 'i'(Iniciar PID), 'z'(Zerar Angulo)");
+  
+  tempo_anterior = millis();
+}
+
+// ==============================================================================
+// LOOP PRINCIPAL
+// ==============================================================================
+void loop() {
+  // 1. Leitura dos comandos via Monitor Serial
+  if (Serial.available() > 0) {
+    numero = Serial.read();
+    
+    if (numero == '1') {
+      digitalWrite(pino_enable, LOW); 
+      sentido_horario = 1; sentido_antihorario = 0; pid_ativo = false;
+      motor1.setSpeed(1000); 
+    } 
+    if (numero == '2') {
+      digitalWrite(pino_enable, LOW); 
+      sentido_horario = 0; sentido_antihorario = 1; pid_ativo = false;
+      motor1.setSpeed(-1000); 
+    }
+    // Trava de segurança (Parar Tudo)
+    if (numero == '3' || numero == 's' || numero == 'S') {
+      sentido_horario = 0; sentido_antihorario = 0;
+      pid_ativo = false; // MATA O PID AQUI
+      motor1.setSpeed(0);
+      digitalWrite(pino_enable, HIGH); 
+      Serial.println("\n[Comando] EMERGENCIA: Motor e PID Desativados.");
+    } 
+    // Iniciar / Religar o PID
+    if (numero == 'i' || numero == 'I') {
+      sentido_horario = 0; sentido_antihorario = 0;
+      pid_ativo = true;
+      Serial.println("\n[Comando] PID ATIVADO! Cuidado, motor pronto para agir.");
+    }
+    // Zerar o Ângulo
+    if (numero == 'z' || numero == 'Z') {
+      noInterrupts();     
+      encoderPos = 0;     
+      interrupts();       
+      
+      ultimaPosicao = 0;
+      soma_erros = 0;     
+      pid_ativo = true; // Já religa o sistema para você poder testar
+      
+      Serial.println("\n[Comando] Angulo ZERADO! PID Ativado.");
+    }
+  }
+  
+  // 2. CÁLCULO DO PID EM TEMPO FIXO (A cada 10ms)
+  unsigned long tempo_atual = millis();
+  
+  if (tempo_atual - tempo_anterior >= 10) {
+    float dt = (tempo_atual - tempo_anterior) / 1000.0;
+    
+    long pos = encoderPos;
+    pos = pos % 600;
+    if (pos < 0) { pos = pos + 600; }
+    float graus = (pos * 360.0) / 600.0;
+
+    float alvo = 180.0; 
+    float erro = calcularErroCurto(alvo, graus);
+
+    float P = Kp * erro;
+    soma_erros = soma_erros + (erro * dt);
+    float I = Ki * soma_erros;
+    float taxa_variacao = (erro - erro_anterior) / dt;
+    float D = Kd * taxa_variacao;
+
+    float saida_pid = P + I + D;
+
+    static unsigned long tempo_print = 0;
+    if (tempo_atual - tempo_print >= 200) { 
+      Serial.print("Graus: "); Serial.print(graus, 1);
+      Serial.print(" | Erro: "); Serial.print(erro, 1);
+      Serial.print(" | PID Ativo: "); Serial.print(pid_ativo ? "SIM" : "NAO");
+      Serial.print(" | Saida: "); Serial.println(saida_pid, 2);
+      tempo_print = tempo_atual;
+    }
+
+    erro_anterior = erro;
+    tempo_anterior = tempo_atual;
+    ultimaPosicao = encoderPos;
+    
+    // ==========================================================
+    // FECHANDO A MALHA
+    // ==========================================================
+    if (sentido_horario == 0 && sentido_antihorario == 0) {
+      
+      // SÓ LIGA O MOTOR SE O PID ESTIVER ATIVO *E* ESTIVER NA ZONA
+      if (pid_ativo == true && abs(erro) < 30.0) {
+        digitalWrite(pino_enable, LOW); 
+        
+        float velocidade_alvo = saida_pid * 40.0; 
+        
+        if (velocidade_alvo > velocidade_motor) velocidade_alvo = velocidade_motor;
+        if (velocidade_alvo < -velocidade_motor) velocidade_alvo = -velocidade_motor;
+        
+        motor1.setSpeed(velocidade_alvo);
+      } 
+      // SE CAIU OU SE O PID ESTIVER DESATIVADO (MORTAL)
+      else {
+        digitalWrite(pino_enable, HIGH); 
+        motor1.setSpeed(0);
+        soma_erros = 0; 
+      }
+    }
+  }
+  
+  // 3. Execução Contínua de Velocidade
+  motor1.runSpeed(); 
+}
