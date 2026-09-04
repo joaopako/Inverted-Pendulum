@@ -8,7 +8,7 @@ This project implements an inverted pendulum system using Arduino. The inverted 
 
 The following diagram illustrates the wiring connections for the inverted pendulum system:
 
-![Pendulum Wiring Diagram](/home/favulo/Downloads/pendulum_diagram.png)
+![Pendulum Wiring Diagram](assets/pendulum_diagram.png)
 
 ## List of components:
 
